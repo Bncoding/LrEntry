@@ -56,10 +56,10 @@
                 <div>
                     <div class="flex items-center gap-2">
                         <h1 class="text-xl sm:text-2xl font-bold tracking-tight">Saree Transport & LR Tracker</h1>
-                        <!-- Live Sync Indicator -->
-                        <span id="sync-status" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-200 border border-emerald-400/30">
-                            <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse mr-1.5"></span>
-                            Live Sync On
+                        <!-- Live Sync / Offline Indicator -->
+                        <span id="sync-status" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/20 text-amber-200 border border-amber-400/30">
+                            <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse mr-1.5"></span>
+                            Connecting...
                         </span>
                     </div>
                     <p class="text-xs text-rose-200 font-medium">साड़ी व्यापार - बिल्टी (LR) एवं ट्रांसपोर्ट लाइव रजिस्टर</p>
@@ -367,68 +367,104 @@
         import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase Configuration setup
-        // For Firebase JS SDK v7.20.0 and later, measurementId is optional
-const firebaseConfig = {
-  apiKey: "AIzaSyCXLhl2ZRfh1ifnBgPvEQ2tIw88plA22AU",
-  authDomain: "lrentry-2472c.firebaseapp.com",
-  projectId: "lrentry-2472c",
-  storageBucket: "lrentry-2472c.firebasestorage.app",
-  messagingSenderId: "214572801932",
-  appId: "1:214572801932:web:cc6f6aba719ef9337e00a9",
-  measurementId: "G-586G7CY3CE"
+        const firebaseConfig = {
+apiKey: "AIzaSyCXLhl2ZRfh1ifnBgPvEQ2tIw88plA22AU",
+authDomain: "lrentry-2472c.firebaseapp.com",
+projectId: "lrentry-2472c",
+storageBucket: "lrentry-2472c.firebasestorage.app",
+messagingSenderId: "214572801932",
+appId: "1:214572801932:web:cc6f6aba719ef9337e00a9",
+measurementId: "G-586G7CY3CE"
 };
 
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'saree-transport-app';
 
-        // Initialize Firebase
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
+        // Initialize Firebase variables once
+        let app = null;
+        let auth = null;
+        let db = null;
+        let isFirebaseAvailable = false;
+
+        try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+            isFirebaseAvailable = true;
+        } catch (err) {
+            console.warn("Firebase initialization warning:", err);
+            isFirebaseAvailable = false;
+        }
 
         let currentUser = null;
         let lrEntries = [];
         let currentTransportFilter = 'ALL';
         let unsubscribeListener = null;
 
-        // Collection Reference according to Rule 1
+        // Collection Reference
         const getCollectionRef = () => {
+            if (!db) return null;
             return collection(db, 'artifacts', appId, 'public', 'data', 'lr_entries');
         };
 
-        // Initialize Authentication
-        async function initAuth() {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
+        // Initialize App & Authentication with Fallback
+        async function initApp() {
+            if (isFirebaseAvailable && auth) {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (authErr) {
+                    console.warn("Firebase Auth Error (Fallback to Local Storage):", authErr.message);
+                    updateSyncStatus(false, "Local Storage Mode");
+                    loadLocalData();
+                    return;
                 }
-            } catch (err) {
-                console.error("Firebase Auth Error:", err);
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        currentUser = user;
+                        updateSyncStatus(true, "Live Firebase Sync");
+                        setupRealtimeListener();
+                    } else {
+                        updateSyncStatus(false, "Local Storage Mode");
+                        loadLocalData();
+                    }
+                });
+            } else {
+                updateSyncStatus(false, "Local Storage Mode");
+                loadLocalData();
             }
         }
 
-        onAuthStateChanged(auth, (user) => {
-            if (user) {
-                currentUser = user;
-                document.getElementById('sync-status').innerHTML = `
-                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse mr-1.5"></span>
-                    Live Sync Connected
-                `;
-                setupRealtimeListener();
+        function updateSyncStatus(isLive, label) {
+            const statusEl = document.getElementById('sync-status');
+            if (!statusEl) return;
+            if (isLive) {
+                statusEl.className = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-200 border border-emerald-400/30";
+                statusEl.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse mr-1.5"></span> ${label}`;
             } else {
-                initAuth();
+                statusEl.className = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-500/20 text-slate-200 border border-slate-400/30";
+                statusEl.innerHTML = `<span class="w-2 h-2 rounded-full bg-slate-300 mr-1.5"></span> ${label}`;
             }
-        });
+        }
 
         // Setup Firestore Listener
         function setupRealtimeListener() {
-            if (!currentUser) return;
+            if (!currentUser || !db) {
+                loadLocalData();
+                return;
+            }
+
             if (unsubscribeListener) unsubscribeListener();
 
             const colRef = getCollectionRef();
+            if (!colRef) {
+                loadLocalData();
+                return;
+            }
             
-            // Simple query according to Rule 2
             unsubscribeListener = onSnapshot(colRef, (snapshot) => {
                 lrEntries = [];
                 snapshot.forEach(docSnap => {
@@ -438,9 +474,11 @@ const firebaseConfig = {
                 // Sort in memory by date descending
                 lrEntries.sort((a, b) => new Date(b.lrDate || 0) - new Date(a.lrDate || 0));
 
+                // Backup to localStorage
+                localStorage.setItem('saree_lr_data_backup', JSON.stringify(lrEntries));
+
                 document.getElementById('loading-state').classList.add('hidden');
                 
-                // If cloud db is empty, load sample entries
                 if (lrEntries.length === 0 && !localStorage.getItem('initial_sample_seeded')) {
                     seedSampleData();
                     localStorage.setItem('initial_sample_seeded', 'true');
@@ -450,15 +488,42 @@ const firebaseConfig = {
                     updateStats();
                 }
             }, (error) => {
-                console.error("Firestore error:", error);
-                document.getElementById('loading-state').innerHTML = `<p class="text-rose-600 font-semibold">Error loading live data. Please check internet connection.</p>`;
+                console.warn("Firestore listener error, switching to local backup:", error.message);
+                updateSyncStatus(false, "Local Backup Mode");
+                loadLocalData();
             });
         }
 
-        // Seed Initial Saree Sample Data if empty
-        async function seedSampleData() {
-            const sampleData = [
+        // Local Storage Backup Loader
+        function loadLocalData() {
+            const saved = localStorage.getItem('saree_lr_data_backup');
+            if (saved) {
+                try {
+                    lrEntries = JSON.parse(saved);
+                } catch (e) {
+                    lrEntries = [];
+                }
+            }
+
+            if (lrEntries.length === 0) {
+                lrEntries = getInitialSampleData();
+                saveLocalData();
+            }
+
+            document.getElementById('loading-state').classList.add('hidden');
+            renderTabs();
+            renderTable();
+            updateStats();
+        }
+
+        function saveLocalData() {
+            localStorage.setItem('saree_lr_data_backup', JSON.stringify(lrEntries));
+        }
+
+        function getInitialSampleData() {
+            return [
                 {
+                    id: 'sample-1',
                     transportName: 'VRL Logistics',
                     lrNumber: 'VRL-88219',
                     lrDate: '2026-10-25',
@@ -473,6 +538,7 @@ const firebaseConfig = {
                     remarks: 'Bale #12, Driver: 9876543210'
                 },
                 {
+                    id: 'sample-2',
                     transportName: 'Sugama Tourist Transport',
                     lrNumber: 'SUG-41002',
                     lrDate: '2026-10-22',
@@ -487,20 +553,34 @@ const firebaseConfig = {
                     remarks: 'Received at Main Godown'
                 }
             ];
+        }
 
-            for (const item of sampleData) {
-                const docRef = doc(getCollectionRef());
-                await setDoc(docRef, item);
+        // Seed Initial Saree Sample Data
+        async function seedSampleData() {
+            const sampleData = getInitialSampleData();
+
+            if (currentUser && db) {
+                for (const item of sampleData) {
+                    try {
+                        const { id, ...data } = item;
+                        const docRef = doc(getCollectionRef());
+                        await setDoc(docRef, data);
+                    } catch(e) {
+                        console.warn("Cloud seed error:", e);
+                    }
+                }
+            } else {
+                lrEntries = sampleData;
+                saveLocalData();
+                renderTabs();
+                renderTable();
+                updateStats();
             }
         }
 
-        // Save / Update Entry in Firestore
+        // Save / Update Entry
         window.handleFormSubmit = async function(e) {
             e.preventDefault();
-            if (!currentUser) {
-                alert("Firebase auth not ready. Try again.");
-                return;
-            }
 
             const btn = document.getElementById('save-btn');
             btn.disabled = true;
@@ -525,14 +605,21 @@ const firebaseConfig = {
 
                 entryData.totalAmount = (entryData.quantity * entryData.rate) + entryData.freightCharge;
 
-                if (id) {
-                    // Update existing
-                    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'lr_entries', id);
-                    await setDoc(docRef, entryData, { merge: true });
+                if (currentUser && db) {
+                    try {
+                        if (id) {
+                            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'lr_entries', id);
+                            await setDoc(docRef, entryData, { merge: true });
+                        } else {
+                            const docRef = doc(getCollectionRef());
+                            await setDoc(docRef, entryData);
+                        }
+                    } catch (cloudErr) {
+                        console.warn("Cloud save failed, saving locally:", cloudErr);
+                        saveLocallyDirect(id, entryData);
+                    }
                 } else {
-                    // Add new
-                    const docRef = doc(getCollectionRef());
-                    await setDoc(docRef, entryData);
+                    saveLocallyDirect(id, entryData);
                 }
 
                 closeModal();
@@ -541,21 +628,50 @@ const firebaseConfig = {
                 alert("Error saving data: " + err.message);
             } finally {
                 btn.disabled = false;
-                btn.innerText = "Save to Firebase";
+                btn.innerText = "Save Entry";
             }
         };
+
+        function saveLocallyDirect(id, entryData) {
+            if (id) {
+                const idx = lrEntries.findIndex(e => e.id === id);
+                if (idx !== -1) {
+                    lrEntries[idx] = { id, ...entryData };
+                }
+            } else {
+                const newId = 'local-' + Date.now();
+                lrEntries.unshift({ id: newId, ...entryData });
+            }
+            saveLocalData();
+            renderTabs();
+            renderTable();
+            updateStats();
+        }
 
         // Delete Entry
         window.deleteEntry = async function(id) {
             if (confirm('Kya aap is LR entry ko permanent delete karna chahte hain?')) {
-                try {
-                    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'lr_entries', id);
-                    await deleteDoc(docRef);
-                } catch (err) {
-                    console.error("Delete error:", err);
+                if (currentUser && db) {
+                    try {
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'lr_entries', id);
+                        await deleteDoc(docRef);
+                    } catch (err) {
+                        console.warn("Cloud delete failed, removing locally:", err);
+                        deleteLocally(id);
+                    }
+                } else {
+                    deleteLocally(id);
                 }
             }
         };
+
+        function deleteLocally(id) {
+            lrEntries = lrEntries.filter(e => e.id !== id);
+            saveLocalData();
+            renderTabs();
+            renderTable();
+            updateStats();
+        }
 
         // Toggle Status Quickly
         window.toggleStatus = async function(id) {
@@ -563,17 +679,35 @@ const firebaseConfig = {
             if (!item) return;
 
             const nextStatus = item.status === 'Delivered' ? 'In Transit' : 'Delivered';
-            try {
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'lr_entries', id);
-                await setDoc(docRef, { status: nextStatus }, { merge: true });
-            } catch (err) {
-                console.error("Toggle error:", err);
+
+            if (currentUser && db) {
+                try {
+                    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'lr_entries', id);
+                    await setDoc(docRef, { status: nextStatus }, { merge: true });
+                } catch (err) {
+                    console.warn("Cloud status toggle failed, updating locally:", err);
+                    updateStatusLocally(id, nextStatus);
+                }
+            } else {
+                updateStatusLocally(id, nextStatus);
             }
         };
+
+        function updateStatusLocally(id, nextStatus) {
+            const idx = lrEntries.findIndex(e => e.id === id);
+            if (idx !== -1) {
+                lrEntries[idx].status = nextStatus;
+                saveLocalData();
+                renderTabs();
+                renderTable();
+                updateStats();
+            }
+        }
 
         // Render Tabs
         window.renderTabs = function() {
             const tabsContainer = document.getElementById('transport-tabs');
+            if (!tabsContainer) return;
             const transports = Array.from(new Set(lrEntries.map(e => (e.transportName || '').trim()))).filter(Boolean);
             
             let html = `
@@ -605,6 +739,8 @@ const firebaseConfig = {
         window.renderTable = function() {
             const tbody = document.getElementById('lr-table-body');
             const emptyState = document.getElementById('empty-state');
+            if (!tbody || !emptyState) return;
+
             const searchVal = document.getElementById('search-input').value.toLowerCase().trim();
             const statusVal = document.getElementById('status-filter').value;
 
@@ -854,7 +990,13 @@ const firebaseConfig = {
                 .replace(/'/g, "&#039;");
         }
 
-        document.getElementById('print-date').innerText = new Date().toLocaleDateString('en-IN');
+        const printDateEl = document.getElementById('print-date');
+        if (printDateEl) {
+            printDateEl.innerText = new Date().toLocaleDateString('en-IN');
+        }
+
+        // Start initialization
+        initApp();
     </script>
 </body>
 </html>
